@@ -1,7 +1,10 @@
 package blockchain
 
 import (
+	"bytes"
+	"crypto/ecdsa"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -145,7 +148,7 @@ type UTXO struct {
 	outIdx int
 }
 
-func (chain *BlockChain) FindUTXOs(address string) []UTXO {
+func (chain *BlockChain) FindUTXOs(pubKeyHash []byte) []UTXO {
 	var utxos []UTXO
 
 	spentTXOs := make(map[TXOInfoPair]bool)
@@ -158,7 +161,7 @@ func (chain *BlockChain) FindUTXOs(address string) []UTXO {
 
 			if !tx.IsCoinbase() {
 				for _, in := range tx.Inputs {
-					if in.CanUnlock(address) {
+					if in.UsesKey(pubKeyHash) {
 						inTxID := hex.EncodeToString(in.ID)
 						spentTXOs[TXOInfoPair{inTxID, in.Out}] = true
 					}
@@ -180,7 +183,7 @@ func (chain *BlockChain) FindUTXOs(address string) []UTXO {
 
 			for outIdx, out := range tx.Outputs {
 
-				if out.CanBeUnlocked(address) && !spentTXOs[TXOInfoPair{txID, outIdx}] {
+				if out.IsLockedWithKey(pubKeyHash) && !spentTXOs[TXOInfoPair{txID, outIdx}] {
 
 					utxo := UTXO{out, txID, outIdx}
 
@@ -197,8 +200,8 @@ func (chain *BlockChain) FindUTXOs(address string) []UTXO {
 	return utxos
 }
 
-func (chain *BlockChain) FindSpendableOutputs(address string, amount int) (int, map[string][]int) {
-	utxos := chain.FindUTXOs(address)
+func (chain *BlockChain) FindSpendableOutputs(pubKeyHash []byte, amount int) (int, map[string][]int) {
+	utxos := chain.FindUTXOs(pubKeyHash)
 	accumulated := 0
 
 	unspentOuts := make(map[string][]int)
@@ -208,7 +211,7 @@ Work:
 		txID := utxo.txID
 		out := utxo.Output
 
-		if out.CanBeUnlocked(address) && accumulated < amount {
+		if out.IsLockedWithKey(pubKeyHash) && accumulated < amount {
 			accumulated += out.Value
 			unspentOuts[txID] = append(unspentOuts[txID], utxo.outIdx)
 
@@ -219,4 +222,48 @@ Work:
 	}
 
 	return accumulated, unspentOuts
+}
+
+func (bc *BlockChain) FindTransaction(ID []byte) (Transaction, error) {
+	iter := bc.Iterator()
+
+	for {
+		block := iter.Next()
+
+		for _, tx := range block.Transactions {
+			if bytes.Compare(tx.ID, ID) == 0 {
+				return *tx, nil
+			}
+		}
+
+		if len(block.PrevHash) == 0 {
+			break
+		}
+	}
+
+	return Transaction{}, errors.New("Transaction does not exist")
+}
+
+func (bc *BlockChain) SignTransaction(tx *Transaction, privKey ecdsa.PrivateKey) {
+	prevTXs := make(map[string]Transaction)
+
+	for _, in := range tx.Inputs {
+		prevTX, err := bc.FindTransaction(in.ID)
+		Handle(err)
+		prevTXs[hex.EncodeToString(prevTX.ID)] = prevTX
+	}
+
+	tx.Sign(privKey, prevTXs)
+}
+
+func (bc *BlockChain) VerifyTransaction(tx *Transaction) bool {
+	prevTXs := make(map[string]Transaction)
+
+	for _, in := range tx.Inputs {
+		prevTX, err := bc.FindTransaction(in.ID)
+		Handle(err)
+		prevTXs[hex.EncodeToString(prevTX.ID)] = prevTX
+	}
+
+	return tx.Verify(prevTXs)
 }
